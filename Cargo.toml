@@ -1,0 +1,12 @@
+[package]
+name = "stgolf"
+version = "0.1.0"
+authors = ["Jani Mustonen <janijohannes@kapsi.fi>"]
+edition = "2018"
+
+[profile.release]
+lto = true
+
+[dependencies]
+itertools = "0.8.0"
+derivative = "1.0.2"
