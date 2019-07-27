@@ -1,7 +1,7 @@
-#![feature(test)]
+#![feature(test, slice_patterns)]
+#![warn(clippy::all)]
 
-#[macro_use]
-extern crate derivative;
+#[macro_use] extern crate derivative;
 extern crate test;
 
 mod store;
@@ -11,6 +11,12 @@ use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::str::CharIndices;
+
+macro_rules! catch {
+    ($($code:tt)+) => {
+        (|| Some({ $($code)+ }))()
+    };
+}
 
 struct AstStorePhantom;
 type AstKey = store::Key<AstStorePhantom>;
@@ -68,6 +74,15 @@ impl Value {
             Value::Int(_) => ExprType::Int,
             Value::String(_) => ExprType::String,
             Value::Bool(_) => ExprType::Bool,
+        }
+    }
+
+    #[allow(dead_code)]
+    fn value_type(&self) -> ValueType {
+        match self {
+            Value::Int(_) => ValueType::Int,
+            Value::String(_) => ValueType::String,
+            Value::Bool(_) => ValueType::Bool,
         }
     }
 }
@@ -222,19 +237,17 @@ impl<'a> AstNode<'a> {
         match &self.expr {
             Constant(c) => {
                 let t = c.expr_type();
-                if let Some(expected) = read_as {
-                    if !expected.contains(&t) {
-                        return Err(TypeError {
-                            my_type: Some(t),
-                            ..TypeError::for_node(self, read_as)
-                        });
-                    }
+                if catch! { read_as?.contains(&t) } == Some(false) {
+                    return Err(TypeError {
+                        my_type: Some(t),
+                        ..TypeError::for_node(self, read_as)
+                    });
                 }
                 Ok(t)
             }
             Add(l, r) => {
                 let allowv = read_as
-                    .unwrap_or(&[])
+                    .unwrap_or(&[ExprType::Int, ExprType::String, ExprType::Bool])
                     .iter()
                     .filter(|x| **x != ExprType::Void)
                     .cloned()
@@ -247,7 +260,7 @@ impl<'a> AstNode<'a> {
                         .map_err(TypeError::create_map_up(|e| {
                             TypeError::for_node(self, read_as).wrong_param(0, allow, e.my_type)
                         }))?;
-                let rtarget = if allow.unwrap().contains(&ExprType::String) {
+                let rtarget = if allowv.contains(&ExprType::String) {
                     [lt, ExprType::String]
                 } else {
                     [lt, lt]
@@ -274,12 +287,10 @@ impl<'a> AstNode<'a> {
             }
             Print(value) => store.get(*value).expr_type(store, read_as),
             ReadLine => {
-                if let Some(expected) = read_as {
-                    if !expected.contains(&ExprType::String) {
-                        return Err(
-                            TypeError::for_node(self, read_as).my_type(Some(ExprType::String))
-                        );
-                    }
+                if catch! { read_as?.contains(&ExprType::String) } == Some(false) {
+                    return Err(
+                        TypeError::for_node(self, read_as).my_type(Some(ExprType::String))
+                    );
                 }
                 Ok(ExprType::String)
             }
@@ -317,17 +328,15 @@ impl<'a> AstNode<'a> {
                 Ok(tt)
             }
             Compare(o, l, r) => {
-                if let Some(expected) = read_as {
-                    if !expected.contains(&ExprType::Bool) {
-                        return Err(
-                            TypeError::for_node(self, read_as).my_type(Some(ExprType::Bool))
-                        );
-                    }
+                if catch! { read_as?.contains(&ExprType::Bool) } == Some(false) {
+                    return Err(
+                        TypeError::for_node(self, read_as).my_type(Some(ExprType::Bool))
+                    );
                 }
                 let target: &[ExprType] = if *o == Ordering::Equal {
                     &[ExprType::Bool, ExprType::Int, ExprType::String]
                 } else {
-                    &[ExprType::Bool]
+                    &[ExprType::Int]
                 };
                 let lt = store.get(*l).expr_type(store, Some(target)).map_err(
                     TypeError::create_map_up(|e| {
@@ -353,12 +362,10 @@ impl<'a> AstNode<'a> {
                 }
             }
             Repeat(c, b) => {
-                if let Some(expected) = read_as {
-                    if !expected.contains(&ExprType::Void) {
-                        return Err(
-                            TypeError::for_node(self, read_as).my_type(Some(ExprType::Void))
-                        );
-                    }
+                if catch! { read_as?.contains(&ExprType::Void) } == Some(false) {
+                    return Err(
+                        TypeError::for_node(self, read_as).my_type(Some(ExprType::Void))
+                    );
                 }
                 store
                     .get(*c)
@@ -421,15 +428,14 @@ impl<'a> ParserContext<'a> {
 
     fn next_symbol(&self) -> ParseResult<&ExprDecl> {
         let (pos, symbol) = self.next_char()?;
-        let decl = self
+        self
             .builtins
             .iter()
             .find(|x| x.symbol == symbol)
             .ok_or_else(|| ParseError {
                 reason: ParseErrorReason::UnknownSymbol(symbol),
                 position: Some(pos),
-            })?;
-        Ok(decl)
+            })
     }
 
     fn peek_char(&self) -> ParseResult<(usize, char)> {
@@ -500,7 +506,9 @@ impl<'a> Parser<'a> {
         let decl = context.next_symbol()?;
         let mut slots_read = Vec::new();
 
-        'shapes: for shape in &decl.shapes {
+        // Once more slot types exist, this'll loop.
+        #[allow(clippy::never_loop)]
+        for shape in &decl.shapes {
             for (_slot_idx, slot) in shape.slots.iter().enumerate() {
                 match slot {
                     ExprSlot::Value { .. } => {
@@ -512,7 +520,7 @@ impl<'a> Parser<'a> {
             let end = context
                 .peek_char()
                 .map(|x| x.0)
-                .unwrap_or(context.code.len());
+                .unwrap_or_else(|_| context.code.len());
 
             let node = AstNode {
                 expr: (shape.build_expr)(&self.ast_store, &slots_read),
@@ -542,12 +550,12 @@ impl<'a> Parser<'a> {
                 }
             };
             context.next_char()?;
-            result = result * 10 + digit as i64;
+            result = result * 10 + i64::from(digit);
         }
         let node = AstNode {
             expr: AstExpr::Constant(Value::Int(result)),
             position: start,
-            code: &context.code[start..end.unwrap_or(context.code.len())],
+            code: &context.code[start..end.unwrap_or_else(|| context.code.len())],
         };
         // println!("{:?}", node);
         Ok(self.ast_store.insert(node))
@@ -575,7 +583,7 @@ impl<'a> Parser<'a> {
         let node = AstNode {
             expr: AstExpr::Constant(Value::String(Rc::new(result))),
             position: start,
-            code: &context.code[start..end.unwrap_or(context.code.len())],
+            code: &context.code[start..end.unwrap_or_else(|| context.code.len())],
         };
         // println!("{:?}", node);
         Ok(self.ast_store.insert(node))
@@ -599,7 +607,8 @@ enum Instruction {
     Copy(ValueType),
     Drop(ValueType),
     ReadLine,
-    Compare(ValueType, Ordering),
+    CompareZero(Ordering),
+    CompareEqual(ValueType),
     CondJump(usize, bool),
     Jump(usize),
     Halt,
@@ -759,7 +768,12 @@ impl BasicBlockBuilder {
             AstExpr::Compare(o, l, r) => {
                 self.build_instructions(store, *l)?;
                 let rt = self.build_instructions(store, *r)?;
-                self.push(Compare(rt.into_value_type(), *o));
+                if *o == Ordering::Equal {
+                    self.push(CompareEqual(rt.into_value_type()));
+                } else if rt == ExprType::Int {
+                    self.push(Sub(ValueType::Int));
+                    self.push(CompareZero(*o));
+                }
                 ExprType::Bool
             }
             AstExpr::Repeat(c, b) => {
@@ -769,8 +783,7 @@ impl BasicBlockBuilder {
                 self.push(LoadConstant(Value::Int(1)));
                 self.push(Sub(ValueType::Int));
                 self.push(Copy(ValueType::Int));
-                self.push(LoadConstant(Value::Int(0)));
-                self.push(Compare(ValueType::Int, Ordering::Less));
+                self.push(CompareZero(Ordering::Less));
 
                 let loop_body = self.new_block();
 
@@ -895,29 +908,23 @@ fn remove_empty(blocks: &mut Vec<BasicBlock>) {
 }
 
 fn reassign_blocks(blocks: &mut Vec<BasicBlock>, original: usize, new: usize) {
+    let reassign = |t: &mut usize| {
+        if *t == original {
+            *t = new;
+        }
+        if *t >= original {
+            *t -= 1;
+        }
+    };
+
     for block in blocks.iter_mut() {
         match &mut block.end {
             BBJump::Jump(t) => {
-                if *t == original {
-                    *t = new;
-                }
-                if *t >= original {
-                    *t -= 1;
-                }
+                reassign(t);
             }
             BBJump::Branch(t, e) => {
-                if *t == original {
-                    *t = new;
-                }
-                if *t >= original {
-                    *t -= 1;
-                }
-                if *e == original {
-                    *e = new;
-                }
-                if *e >= original {
-                    *e -= 1;
-                }
+                reassign(t);
+                reassign(e);
             }
             BBJump::Halt => {}
         }
@@ -1036,13 +1043,15 @@ impl ValueCheck for CheckedValues {
     }
 }
 
-#[derive(Clone, Debug)]
-struct VMFrame {
-    val_stack: Vec<Value>,
+#[derive(Derivative)]
+#[derivative(Clone, Debug)]
+struct VMFrame<Check> {
+    val_stack: VMStack<Check>,
     execution_pointer: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Derivative)]
+#[derivative(Clone, Debug)]
 struct VMStack<Check> {
     int_values: Vec<i64>,
     string_values: Vec<Rc<String>>,
@@ -1050,12 +1059,13 @@ struct VMStack<Check> {
     _check: PhantomData<fn(&Check) -> ()>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Derivative)]
+#[derivative(Clone, Debug)]
 struct VM<Check> {
     instructions: Vec<Instruction>,
     val_stack: VMStack<Check>,
     execution_pointer: usize,
-    stack_frames: Vec<VMFrame>,
+    stack_frames: Vec<VMFrame<Check>>,
     instruction_counter: usize,
 }
 
@@ -1068,7 +1078,6 @@ enum VMStep {
 #[derive(Debug)]
 enum VMError {
     TypeError(TypeError),
-    Unimplemented,
     IO(std::io::Error),
 }
 
@@ -1092,19 +1101,29 @@ macro_rules! vm_values {
             $type:ty: $stack:tt
             $(pop $pop:block)?
             $(push $push:block)?
+            $(peek_mut $peekmut:block)?
          ),*
     ) => {
 $(
 impl<C> VMPop<C> for $type where C: ValueCheck {
+    #[inline(always)]
     fn peek(stack: &VMStack<C>) -> &Self {
         stack.$stack.last().unwrap_or_else(|| C::on_miss())
     }
 
+    #[inline(always)]
+    fn peek_mut(stack: &mut VMStack<C>) -> &mut Self {
+        #![allow(unused_parens)]
+        $(($peekmut))?(stack.$stack.last_mut().unwrap_or_else(|| C::on_miss()))
+    }
+
+    #[inline(always)]
     fn pop(stack: &mut VMStack<C>) -> Self {
         #![allow(unused_parens)]
         $(($pop))?(stack.$stack.pop().unwrap_or_else(|| C::on_miss()))
     }
 
+    #[inline(always)]
     fn push(stack: &mut VMStack<C>, val: Self) {
         #![allow(unused_parens)]
         stack.$stack.push($(($push))?(val));
@@ -1119,6 +1138,7 @@ where
     Check: ValueCheck,
 {
     fn peek(stack: &VMStack<Check>) -> &Self;
+    fn peek_mut(stack: &mut VMStack<Check>) -> &mut Self;
     fn pop(stack: &mut VMStack<Check>) -> Self;
     fn push(stack: &mut VMStack<Check>, val: Self);
 }
@@ -1126,7 +1146,8 @@ where
 vm_values! {
     String: string_values
         pop { |v: Rc<String>| Rc::try_unwrap(v).unwrap_or_else(|v| (&*v).clone()) }
-        push { |v| Rc::new(v) },
+        push { |v| Rc::new(v) }
+        peek_mut { |v| Rc::make_mut(v) },
     Rc<String>: string_values,
     i64: int_values,
     bool: bool_values
@@ -1136,13 +1157,7 @@ impl<Check> VMStack<Check>
 where
     Check: ValueCheck,
 {
-    fn pop<T>(&mut self) -> T
-    where
-        T: VMPop<Check>,
-    {
-        T::pop(self)
-    }
-
+    #[inline(always)]
     fn peek<T>(&self) -> &T
     where
         T: VMPop<Check>,
@@ -1150,6 +1165,24 @@ where
         T::peek(self)
     }
 
+    #[allow(dead_code)]
+    #[inline(always)]
+    fn peek_mut<T>(&mut self) -> &mut T
+    where
+        T: VMPop<Check>,
+    {
+        T::peek_mut(self)
+    }
+
+    #[inline(always)]
+    fn pop<T>(&mut self) -> T
+    where
+        T: VMPop<Check>,
+    {
+        T::pop(self)
+    }
+
+    #[inline(always)]
     fn push<T>(&mut self, val: T)
     where
         T: VMPop<Check>,
@@ -1226,46 +1259,70 @@ where
             }
             if trace {
                 self.stack_frames.push(VMFrame {
-                    val_stack: vec![], //self.val_stack.values.clone(),
+                    val_stack: self.val_stack.clone(),
                     execution_pointer: pos,
                 });
             }
         }
     }
 
+    #[inline(always)]
     fn step(&mut self) -> VMResult<VMStep> {
+        #![allow(clippy::clone_on_copy)]
         type VMString = Rc<String>;
 
-        let instruction = &self.instructions[self.execution_pointer];
+        let stack = &mut self.val_stack;
+
+        let jump = match &self.instructions[self.execution_pointer..] {
+            [Instruction::LoadConstant(Value::Int(v)), Instruction::Sub(ValueType::Int), ..] => {
+                let a = stack.peek_mut::<i64>();
+                *a -= v;
+                2
+            }
+            [Instruction::Copy(ValueType::Int), Instruction::CompareZero(c), ..] => {
+                let a = stack.peek::<i64>();
+                let r = a.cmp(&0) == *c;
+                stack.push(r);
+                2
+            }
+            _ => 0
+        };
+
+        if jump > 0 {
+            self.instruction_counter += jump;
+            self.execution_pointer += jump;
+            return Ok(VMStep::Ok);
+        }
+
+        let instruction = &self.instructions.get(self.execution_pointer).unwrap_or_else(|| Check::on_miss());
+
         self.execution_pointer += 1;
         self.instruction_counter += 1;
-
-        let stack = &mut self.val_stack;
 
         match instruction {
             Instruction::LoadConstant(v) => vm_for_all!(#value v, { stack.push(v.clone()); }),
             Instruction::Add(t) => match t {
                 ValueType::Int => {
-                    let b: i64 = stack.pop();
-                    let a: i64 = stack.pop();
-                    stack.push(a + b);
+                    let b = stack.pop::<i64>();
+                    let a = stack.peek_mut::<i64>();
+                    *a += b;
                 }
                 ValueType::String => {
-                    let b: VMString = stack.pop();
-                    let a: VMString = stack.pop();
-                    stack.push(Rc::try_unwrap(a).unwrap_or_else(|a| (&*a).clone()) + &b);
+                    let b = stack.pop::<VMString>();
+                    let a = stack.peek_mut::<String>();
+                    *a += &*b;
                 }
                 ValueType::Bool => {
-                    let b: bool = stack.pop();
-                    let a: bool = stack.pop();
-                    stack.push(a || b);
+                    let b = stack.pop::<bool>();
+                    let a = stack.peek_mut::<bool>();
+                    *a = *a || b;
                 }
             },
             Instruction::Sub(t) => match t {
                 ValueType::Int => {
-                    let b: i64 = stack.pop();
-                    let a: i64 = stack.pop();
-                    stack.push(a - b);
+                    let b = stack.pop::<i64>();
+                    let a = stack.peek_mut::<i64>();
+                    *a -= b;
                 }
                 ValueType::String => {
                     unreachable!("Sub(String)");
@@ -1286,31 +1343,27 @@ where
                 buf = buf.trim_end_matches(|c| c == '\r' || c == '\n').into();
                 stack.push(buf);
             }
-            Instruction::Compare(k, c) => match k {
+            Instruction::CompareEqual(k) => match k {
                 ValueType::Int => {
                     let b: i64 = stack.pop();
                     let a: i64 = stack.pop();
-                    stack.push(a.cmp(&b) == *c);
+                    stack.push(a == b);
                 }
                 ValueType::String => {
-                    if *c != Ordering::Equal {
-                        eprintln!("Ordering {:?} not implemented for type {:?}", c, k);
-                        return Err(VMError::Unimplemented);
-                    }
                     let b: VMString = stack.pop();
                     let a: VMString = stack.pop();
                     stack.push(a == b);
                 }
                 ValueType::Bool => {
-                    if *c != Ordering::Equal {
-                        eprintln!("Ordering {:?} not implemented for type {:?}", c, k);
-                        return Err(VMError::Unimplemented);
-                    }
                     let b: bool = stack.pop();
-                    let a: bool = stack.pop();
-                    stack.push(a == b);
+                    let a = stack.peek_mut::<bool>();
+                    *a = *a == b;
                 }
             },
+            Instruction::CompareZero(c) => {
+                let a: i64 = stack.pop();
+                stack.push(a.cmp(&0) == *c);
+            }
             Instruction::CondJump(target, truthy) => {
                 let c: bool = stack.pop();
                 if c == *truthy {
@@ -1429,7 +1482,7 @@ fn main() {
     let mut parser = Parser::new();
     let code = std::env::args()
         .nth(1)
-        .unwrap_or(r#"P"Hello, world""#.to_owned());
+        .unwrap_or_else(|| r#"P"Hello, world""#.to_owned());
     let context = ParserContext::new(builtins, &code);
 
     let (res, total_time) = measure(|| -> VMResult<()> {
@@ -1507,7 +1560,7 @@ fn main() {
         }
 
         println!("\nExecution:");
-        let mut vm = VM::<CheckedValues>::new(instructions);
+        let mut vm = VM::<UncheckedValues>::new(instructions);
         let (res, exec_time) = measure(|| {
             vm.run(
                 std::env::args()
@@ -1521,10 +1574,12 @@ fn main() {
         println!("\n\nTrace:");
         for frame in &vm.stack_frames {
             println!(
-                "  {: <3} {: <30} -> Stack: {:?}",
+                "{: <3} {: <30} -> Int: {:?}, Bool: {:?}, String: {:?}",
                 frame.execution_pointer,
                 format!("{:?}", &vm.instructions[frame.execution_pointer]),
-                frame.val_stack,
+                frame.val_stack.int_values,
+                frame.val_stack.bool_values,
+                frame.val_stack.string_values,
             );
         }
 
@@ -1548,9 +1603,6 @@ fn main() {
         }
         Err(VMError::TypeError(e)) => {
             print_type_error(&code, &e);
-        }
-        Err(VMError::Unimplemented) => {
-            println!("Executed unimplemented opcode");
         }
     }
 

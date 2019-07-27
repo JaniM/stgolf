@@ -1,0 +1,149 @@
+    Checking stgolf v0.1.0 (C:\Users\Jani\Documents\GitHub\stgolf)
+warning: lint name `clippy` is deprecated and may not have an effect in the future. Also `cfg_attr(cargo-clippy)` won't be necessary anymore
+ --> src\main.rs:2:9
+  |
+2 | #![warn(clippy)]
+  |         ^^^^^^ help: change it to: `clippy::all`
+  |
+  = note: `#[warn(renamed_and_removed_lints)]` on by default
+
+warning: lint name `clippy` is deprecated and may not have an effect in the future. Also `cfg_attr(cargo-clippy)` won't be necessary anymore
+ --> src\main.rs:2:9
+  |
+2 | #![warn(clippy)]
+  |         ^^^^^^ help: change it to: `clippy::all`
+
+warning: method is never used: `value_type`
+  --> src\main.rs:80:5
+   |
+80 |     fn value_type(&self) -> ValueType {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: method is never used: `peek_mut`
+    --> src\main.rs:1159:5
+     |
+1159 | /     fn peek_mut<T>(&mut self) -> &mut T
+1160 | |     where
+1161 | |         T: VMPop<Check>,
+1162 | |     {
+1163 | |         T::peek_mut(self)
+1164 | |     }
+     | |_____^
+
+warning: unused label `'shapes`
+   --> src\main.rs:508:9
+    |
+508 | /         'shapes: for shape in &decl.shapes {
+509 | |             for (_slot_idx, slot) in shape.slots.iter().enumerate() {
+510 | |                 match slot {
+511 | |                     ExprSlot::Value { .. } => {
+...   |
+528 | |             return Ok(self.ast_store.insert(node));
+529 | |         }
+    | |_________^
+    |
+note: lint level defined here
+   --> src\main.rs:2:9
+    |
+2   | #![warn(clippy)]
+    |         ^^^^^^
+    = note: `#[warn(clippy::unused_label)]` implied by `#[warn(clippy::all)]`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#unused_label
+
+warning: this loop never actually loops
+   --> src\main.rs:508:9
+    |
+508 | /         'shapes: for shape in &decl.shapes {
+509 | |             for (_slot_idx, slot) in shape.slots.iter().enumerate() {
+510 | |                 match slot {
+511 | |                     ExprSlot::Value { .. } => {
+...   |
+528 | |             return Ok(self.ast_store.insert(node));
+529 | |         }
+    | |_________^
+    |
+note: lint level defined here
+   --> src\main.rs:2:9
+    |
+2   | #![warn(clippy)]
+    |         ^^^^^^
+    = note: `#[warn(clippy::never_loop)]` implied by `#[warn(clippy::all)]`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#never_loop
+
+warning: use of `unwrap_or` followed by a function call
+   --> src\main.rs:520:18
+    |
+520 |                 .unwrap_or(context.code.len());
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try this: `unwrap_or_else(|_| context.code.len())`
+    |
+note: lint level defined here
+   --> src\main.rs:2:9
+    |
+2   | #![warn(clippy)]
+    |         ^^^^^^
+    = note: `#[warn(clippy::or_fun_call)]` implied by `#[warn(clippy::all)]`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#or_fun_call
+
+warning: casting u32 to i64 may become silently lossy if you later change the type
+   --> src\main.rs:550:36
+    |
+550 |             result = result * 10 + digit as i64;
+    |                                    ^^^^^^^^^^^^ help: try: `i64::from(digit)`
+    |
+note: lint level defined here
+   --> src\main.rs:2:9
+    |
+2   | #![warn(clippy)]
+    |         ^^^^^^
+    = note: `#[warn(clippy::cast_lossless)]` implied by `#[warn(clippy::all)]`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#cast_lossless
+
+warning: use of `unwrap_or` followed by a function call
+   --> src\main.rs:555:44
+    |
+555 |             code: &context.code[start..end.unwrap_or(context.code.len())],
+    |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try this: `unwrap_or_else(|| context.code.len())`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#or_fun_call
+
+warning: use of `unwrap_or` followed by a function call
+   --> src\main.rs:583:44
+    |
+583 |             code: &context.code[start..end.unwrap_or(context.code.len())],
+    |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try this: `unwrap_or_else(|| context.code.len())`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#or_fun_call
+
+warning: using `clone` on a `Copy` type
+    --> src\main.rs:1311:91
+     |
+1311 |             Instruction::Copy(t) => vm_for_all!(#type t, #stack stack, #peek v, { let v = v.clone(); stack.push(v); }),
+     |                                                                                           ^^^^^^^^^ help: try dereferencing it: `*v`
+     |
+note: lint level defined here
+    --> src\main.rs:2:9
+     |
+2    | #![warn(clippy)]
+     |         ^^^^^^
+     = note: `#[warn(clippy::clone_on_copy)]` implied by `#[warn(clippy::all)]`
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#clone_on_copy
+
+warning: using `clone` on a `Copy` type
+    --> src\main.rs:1311:91
+     |
+1311 |             Instruction::Copy(t) => vm_for_all!(#type t, #stack stack, #peek v, { let v = v.clone(); stack.push(v); }),
+     |                                                                                           ^^^^^^^^^ help: try dereferencing it: `*v`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#clone_on_copy
+
+warning: use of `unwrap_or` followed by a function call
+    --> src\main.rs:1464:10
+     |
+1464 |         .unwrap_or(r#"P"Hello, world""#.to_owned());
+     |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try this: `unwrap_or_else(|| r#"P"Hello, world""#.to_owned())`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#or_fun_call
+
+    Finished dev [unoptimized + debuginfo] target(s) in 1.28s
