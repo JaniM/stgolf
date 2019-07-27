@@ -1,7 +1,8 @@
 #![feature(test, slice_patterns)]
 #![warn(clippy::all)]
 
-#[macro_use] extern crate derivative;
+#[macro_use]
+extern crate derivative;
 extern crate test;
 
 mod store;
@@ -288,9 +289,7 @@ impl<'a> AstNode<'a> {
             Print(value) => store.get(*value).expr_type(store, read_as),
             ReadLine => {
                 if catch! { read_as?.contains(&ExprType::String) } == Some(false) {
-                    return Err(
-                        TypeError::for_node(self, read_as).my_type(Some(ExprType::String))
-                    );
+                    return Err(TypeError::for_node(self, read_as).my_type(Some(ExprType::String)));
                 }
                 Ok(ExprType::String)
             }
@@ -329,9 +328,7 @@ impl<'a> AstNode<'a> {
             }
             Compare(o, l, r) => {
                 if catch! { read_as?.contains(&ExprType::Bool) } == Some(false) {
-                    return Err(
-                        TypeError::for_node(self, read_as).my_type(Some(ExprType::Bool))
-                    );
+                    return Err(TypeError::for_node(self, read_as).my_type(Some(ExprType::Bool)));
                 }
                 let target: &[ExprType] = if *o == Ordering::Equal {
                     &[ExprType::Bool, ExprType::Int, ExprType::String]
@@ -363,9 +360,7 @@ impl<'a> AstNode<'a> {
             }
             Repeat(c, b) => {
                 if catch! { read_as?.contains(&ExprType::Void) } == Some(false) {
-                    return Err(
-                        TypeError::for_node(self, read_as).my_type(Some(ExprType::Void))
-                    );
+                    return Err(TypeError::for_node(self, read_as).my_type(Some(ExprType::Void)));
                 }
                 store
                     .get(*c)
@@ -428,8 +423,7 @@ impl<'a> ParserContext<'a> {
 
     fn next_symbol(&self) -> ParseResult<&ExprDecl> {
         let (pos, symbol) = self.next_char()?;
-        self
-            .builtins
+        self.builtins
             .iter()
             .find(|x| x.symbol == symbol)
             .ok_or_else(|| ParseError {
@@ -1285,7 +1279,7 @@ where
                 stack.push(r);
                 2
             }
-            _ => 0
+            _ => 0,
         };
 
         if jump > 0 {
@@ -1294,7 +1288,10 @@ where
             return Ok(VMStep::Ok);
         }
 
-        let instruction = &self.instructions.get(self.execution_pointer).unwrap_or_else(|| Check::on_miss());
+        let instruction = &self
+            .instructions
+            .get(self.execution_pointer)
+            .unwrap_or_else(|| Check::on_miss());
 
         self.execution_pointer += 1;
         self.instruction_counter += 1;
