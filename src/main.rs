@@ -168,7 +168,9 @@ impl TypeError {
         }
     }
 
-    fn create_map_up(f: impl Fn(&TypeError) -> TypeError) -> impl FnOnce(TypeError) -> TypeError {
+    fn create_map_up(
+        f: impl Fn(&TypeError) -> TypeError,
+    ) -> impl FnOnce(Box<TypeError>) -> TypeError {
         move |e| e.map_up(f)
     }
 }
@@ -233,7 +235,7 @@ impl<'a> AstNode<'a> {
         &self,
         store: &AstStore,
         read_as: Option<&[ExprType]>,
-    ) -> Result<ExprType, TypeError> {
+    ) -> Result<ExprType, Box<TypeError>> {
         use AstExpr::*;
         match &self.expr {
             Constant(c) => {
@@ -242,7 +244,8 @@ impl<'a> AstNode<'a> {
                     return Err(TypeError {
                         my_type: Some(t),
                         ..TypeError::for_node(self, read_as)
-                    });
+                    }
+                    .into());
                 }
                 Ok(t)
             }
@@ -289,7 +292,9 @@ impl<'a> AstNode<'a> {
             Print(value) => store.get(*value).expr_type(store, read_as),
             ReadLine => {
                 if catch! { read_as?.contains(&ExprType::String) } == Some(false) {
-                    return Err(TypeError::for_node(self, read_as).my_type(Some(ExprType::String)));
+                    return Err(TypeError::for_node(self, read_as)
+                        .my_type(Some(ExprType::String))
+                        .into());
                 }
                 Ok(ExprType::String)
             }
@@ -328,7 +333,9 @@ impl<'a> AstNode<'a> {
             }
             Compare(o, l, r) => {
                 if catch! { read_as?.contains(&ExprType::Bool) } == Some(false) {
-                    return Err(TypeError::for_node(self, read_as).my_type(Some(ExprType::Bool)));
+                    return Err(TypeError::for_node(self, read_as)
+                        .my_type(Some(ExprType::Bool))
+                        .into());
                 }
                 let target: &[ExprType] = if *o == Ordering::Equal {
                     &[ExprType::Bool, ExprType::Int, ExprType::String]
@@ -360,7 +367,9 @@ impl<'a> AstNode<'a> {
             }
             Repeat(c, b) => {
                 if catch! { read_as?.contains(&ExprType::Void) } == Some(false) {
-                    return Err(TypeError::for_node(self, read_as).my_type(Some(ExprType::Void)));
+                    return Err(TypeError::for_node(self, read_as)
+                        .my_type(Some(ExprType::Void))
+                        .into());
                 }
                 store
                     .get(*c)
@@ -665,7 +674,11 @@ impl BasicBlockBuilder {
         self.blocks[self.curremt_block].end = jump;
     }
 
-    fn build_statement(&mut self, store: &AstStore, node: AstKey) -> Result<ExprType, TypeError> {
+    fn build_statement(
+        &mut self,
+        store: &AstStore,
+        node: AstKey,
+    ) -> Result<ExprType, Box<TypeError>> {
         store.get(node).expr_type(
             store,
             Some(&[
@@ -686,7 +699,7 @@ impl BasicBlockBuilder {
         &mut self,
         store: &AstStore,
         node: AstKey,
-    ) -> Result<ExprType, TypeError> {
+    ) -> Result<ExprType, Box<TypeError>> {
         use Instruction::*;
         let expr = store.get(node);
         Ok(match &expr.expr {
@@ -1071,23 +1084,23 @@ enum VMStep {
 
 #[derive(Debug)]
 enum VMError {
-    TypeError(TypeError),
+    TypeError(Box<TypeError>),
     IO(std::io::Error),
 }
 
-impl From<std::io::Error> for VMError {
+impl From<std::io::Error> for Box<VMError> {
     fn from(v: std::io::Error) -> Self {
-        VMError::IO(v)
+        Box::new(VMError::IO(v))
     }
 }
 
-impl From<TypeError> for VMError {
-    fn from(v: TypeError) -> Self {
-        VMError::TypeError(v)
+impl From<Box<TypeError>> for Box<VMError> {
+    fn from(v: Box<TypeError>) -> Self {
+        Box::new(VMError::TypeError(v))
     }
 }
 
-type VMResult<T> = Result<T, VMError>;
+type VMResult<T> = Result<T, Box<VMError>>;
 
 macro_rules! vm_values {
     (
@@ -1510,7 +1523,7 @@ fn main() {
                 .join("\n")
         );
 
-        let (res, bb_build_time) = measure(|| -> Result<_, TypeError> {
+        let (res, bb_build_time) = measure(|| -> Result<_, Box<TypeError>> {
             let mut blocks = BasicBlockBuilder::new();
             keys.iter()
                 .try_for_each(|k| blocks.build_statement(&parser.ast_store, *k).map(|_| ()))?;
@@ -1593,7 +1606,7 @@ fn main() {
 
         Ok(())
     });
-    match res {
+    match res.map_err(|v| *v) {
         Ok(()) => {}
         Err(VMError::IO(e)) => {
             println!("IO error: {:?}", e);
