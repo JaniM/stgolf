@@ -43,19 +43,38 @@ impl ExprType {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct FunctionPrototype {
+    params: Vec<ExprType>,
+    out: ExprType
+}
+
+type FunctionBuilder = fn(&mut BasicBlockBuilder, &AstStore, &[AstKey]) -> Result<ExprType, Box<TypeError>>;
+
+#[derive(Derivative)]
+#[derivative(Clone, Debug, PartialEq)]
+struct BuiltinFunction {
+    name: &'static str,
+    symbol: char,
+    param_count: usize,
+    types: Vec<FunctionPrototype>,
+    #[derivative(Debug = "ignore", PartialEq = "ignore")]
+    build: FunctionBuilder
+}
+
+#[derive(Clone, Debug, PartialEq)]
 enum ExprSlot {
     Value { name: &'static str },
 }
 
 #[derive(Derivative)]
-#[derivative(Clone, Debug)]
+#[derivative(Debug)]
 struct ExprShape {
     slots: Vec<ExprSlot>,
     #[derivative(Debug = "ignore")]
-    build_expr: fn(&AstStore, &[AstKey]) -> AstExpr,
+    build_expr: Box<dyn Fn(&AstStore, &[AstKey]) -> AstExpr>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct ExprDecl {
     name: &'static str,
     symbol: char,
@@ -97,6 +116,7 @@ enum AstExpr {
     If(AstKey, AstKey, AstKey),
     Compare(Ordering, AstKey, AstKey),
     Repeat(AstKey, AstKey),
+    CallBuiltin(Rc<BuiltinFunction>, Vec<AstKey>)
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -228,6 +248,13 @@ impl<'a> AstNode<'a> {
                 store.get(*c).print(store, level + 1),
                 store.get(*b).print(store, level + 1)
             ),
+            CallBuiltin(f, a) => format!(
+                "{}Call[{}]<{:?}>({})",
+                "  ".repeat(level),
+                f.name,
+                t,
+                a.iter().map(|a| format!("\n{:?}", store.get(*a).print(store, level + 1))).join(",")
+            )
         }
     }
 
@@ -390,6 +417,29 @@ impl<'a> AstNode<'a> {
                             .down()
                     }))?;
                 Ok(ExprType::Void)
+            }
+            CallBuiltin(func, args) => {
+                let mut matched_up = false;
+                for prototype in &func.types {
+                    if catch! { read_as?.contains(&prototype.out) } == Some(false) {
+                        continue;
+                    }
+                    matched_up = true;
+
+                    if prototype.params.len() != args.len() {
+                        continue;
+                    }
+
+                    if args.iter().zip(prototype.params.iter()).any(|(a, t)| store.get(*a).expr_type(store, Some(&[*t])).is_err()) {
+                        continue;
+                    }
+
+                    return Ok(prototype.out);
+                }
+                Err(TypeError {
+                    direction: if matched_up { TypeErrorDirection::Down } else { TypeErrorDirection::Up },
+                    ..TypeError::for_node(self, read_as)
+                }.into())
             }
         }
     }
@@ -600,6 +650,11 @@ enum ValueType {
     Bool,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Register {
+    WasTrue
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Instruction {
     LoadConstant(Value),
@@ -614,6 +669,8 @@ enum Instruction {
     CompareEqual(ValueType),
     CondJump(usize, bool),
     Jump(usize),
+    PushRegister(Register),
+    LoadRegister(Register),
     Halt,
 }
 
@@ -757,6 +814,7 @@ impl BasicBlockBuilder {
                 let r_type = expr.expr_type(store, None)?;
 
                 self.build_instructions(store, *c)?;
+                self.push(LoadRegister(Register::WasTrue));
                 let start_block = self.curremt_block;
 
                 let then_block = self.new_block();
@@ -781,6 +839,7 @@ impl BasicBlockBuilder {
                     self.push(Sub(ValueType::Int));
                     self.push(CompareZero(*o));
                 }
+                self.push(PushRegister(Register::WasTrue));
                 ExprType::Bool
             }
             AstExpr::Repeat(c, b) => {
@@ -806,6 +865,9 @@ impl BasicBlockBuilder {
                 self.blocks[start].end = BBJump::Branch(end, loop_body);
                 self.blocks[after_loop_body].end = BBJump::Jump(start);
                 ExprType::Void
+            }
+            AstExpr::CallBuiltin(func, args) => {
+                return (func.build)(self, store, args);
             }
         })
     }
@@ -1054,6 +1116,7 @@ impl ValueCheck for CheckedValues {
 #[derivative(Clone, Debug)]
 struct VMFrame<Check> {
     val_stack: VMStack<Check>,
+    registers: VMRegisters,
     execution_pointer: usize,
 }
 
@@ -1066,11 +1129,19 @@ struct VMStack<Check> {
     _check: PhantomData<fn(&Check) -> ()>,
 }
 
+
+#[derive(Derivative)]
+#[derivative(Clone, Debug, Default)]
+struct VMRegisters {
+    was_true: bool
+}
+
 #[derive(Derivative)]
 #[derivative(Clone, Debug)]
 struct VM<Check> {
     instructions: Vec<Instruction>,
     val_stack: VMStack<Check>,
+    registers: VMRegisters,
     execution_pointer: usize,
     stack_frames: Vec<VMFrame<Check>>,
     instruction_counter: usize,
@@ -1201,28 +1272,28 @@ where
 macro_rules! vm_for_all {
     (#type $t:expr,
      $(#stack $stack:ident,
-       $(#pop $pop:pat,)?
+       $(#pop $($pop:pat)+,)?
        $(#peek $peek:ident,)?
      )?
      $thing:block) => {
         match $t {
             ValueType::Int => {
                 $(let stack = &mut *$stack;
-                  $(let $pop = stack.pop::<i64>();)?
+                  $($(let $pop = stack.pop::<i64>();)+)?
                   $(let $peek = stack.peek::<i64>();)?
                 )?
                 $thing
             },
             ValueType::Bool => {
                 $(let stack = &mut *$stack;
-                  $(let $pop = stack.pop::<bool>();)?
+                  $($(let $pop = stack.pop::<bool>();)+)?
                   $(let $peek = stack.peek::<bool>();)?
                 )?
                 $thing
             },
             ValueType::String => {
                 $(let stack = &mut *$stack;
-                  $(let $pop = stack.pop::<Rc<String>>();)?
+                  $($(let $pop = stack.pop::<Rc<String>>();)+)?
                   $(let $peek = stack.peek::<Rc<String>>();)?
                 )?
                 $thing
@@ -1254,6 +1325,7 @@ where
             execution_pointer: 0,
             stack_frames: Vec::new(),
             instruction_counter: 0,
+            registers: VMRegisters::default()
         }
     }
 
@@ -1267,6 +1339,7 @@ where
             if trace {
                 self.stack_frames.push(VMFrame {
                     val_stack: self.val_stack.clone(),
+                    registers: self.registers.clone(),
                     execution_pointer: pos,
                 });
             }
@@ -1279,6 +1352,7 @@ where
         type VMString = Rc<String>;
 
         let stack = &mut self.val_stack;
+        let registers = &mut self.registers;
 
         let jump = match &self.instructions[self.execution_pointer..] {
             [Instruction::LoadConstant(Value::Int(v)), Instruction::Sub(ValueType::Int), ..] => {
@@ -1288,8 +1362,7 @@ where
             }
             [Instruction::Copy(ValueType::Int), Instruction::CompareZero(c), ..] => {
                 let a = stack.peek::<i64>();
-                let r = a.cmp(&0) == *c;
-                stack.push(r);
+                registers.was_true = a.cmp(&0) == *c;
                 2
             }
             _ => 0,
@@ -1310,7 +1383,8 @@ where
         self.instruction_counter += 1;
 
         match instruction {
-            Instruction::LoadConstant(v) => vm_for_all!(#value v, { stack.push(v.clone()); }),
+            Instruction::LoadConstant(v) =>
+                vm_for_all!(#value v, { stack.push(v.clone()); }),
             Instruction::Add(t) => match t {
                 ValueType::Int => {
                     let b = stack.pop::<i64>();
@@ -1341,10 +1415,14 @@ where
                     unreachable!("Sub(Bool)");
                 }
             },
-            Instruction::ToString(t) => vm_for_all!(#type t, #stack stack, #pop v, { stack.push(v.to_string()); }),
-            Instruction::Print(t) => vm_for_all!(#type t, #stack stack, #peek v, { print!("{}", v); }),
-            Instruction::Copy(t) => vm_for_all!(#type t, #stack stack, #peek v, { let v = v.clone(); stack.push(v); }),
-            Instruction::Drop(t) => vm_for_all!(#type t, #stack stack, #pop _, { }),
+            Instruction::ToString(t) =>
+                vm_for_all!(#type t, #stack stack, #pop v, { stack.push(v.to_string()); }),
+            Instruction::Print(t) =>
+                vm_for_all!(#type t, #stack stack, #peek v, { print!("{}", v); }),
+            Instruction::Copy(t) =>
+                vm_for_all!(#type t, #stack stack, #peek v, { let v = v.clone(); stack.push(v); }),
+            Instruction::Drop(t) =>
+                vm_for_all!(#type t, #stack stack, #pop _, { }),
             Instruction::ReadLine => {
                 use std::io::Write;
                 let mut buf = String::new();
@@ -1353,35 +1431,30 @@ where
                 buf = buf.trim_end_matches(|c| c == '\r' || c == '\n').into();
                 stack.push(buf);
             }
-            Instruction::CompareEqual(k) => match k {
-                ValueType::Int => {
-                    let b: i64 = stack.pop();
-                    let a: i64 = stack.pop();
-                    stack.push(a == b);
-                }
-                ValueType::String => {
-                    let b: VMString = stack.pop();
-                    let a: VMString = stack.pop();
-                    stack.push(a == b);
-                }
-                ValueType::Bool => {
-                    let b: bool = stack.pop();
-                    let a = stack.peek_mut::<bool>();
-                    *a = *a == b;
-                }
-            },
+            Instruction::CompareEqual(t) =>
+                vm_for_all!(#type t, #stack stack, #pop b a, { registers.was_true = a == b; }),
             Instruction::CompareZero(c) => {
                 let a: i64 = stack.pop();
-                stack.push(a.cmp(&0) == *c);
+                registers.was_true = a.cmp(&0) == *c;
             }
             Instruction::CondJump(target, truthy) => {
-                let c: bool = stack.pop();
+                let c: bool = registers.was_true;
                 if c == *truthy {
                     self.execution_pointer = *target;
                 }
             }
             Instruction::Jump(target) => {
                 self.execution_pointer = *target;
+            }
+            Instruction::PushRegister(r) => match r {
+                Register::WasTrue => {
+                    stack.push(registers.was_true);
+                }
+            }
+            Instruction::LoadRegister(r) => match r {
+                Register::WasTrue => {
+                    registers.was_true = stack.pop();
+                }
             }
             Instruction::Halt => {
                 return Ok(VMStep::End);
@@ -1398,96 +1471,66 @@ fn measure<T>(f: impl FnOnce() -> T) -> (T, std::time::Duration) {
     (v, start.elapsed())
 }
 
-fn main() {
-    let builtins = vec![
+macro_rules! expr_decl {
+    ($name:ident as $symbol:expr, $(#slots $($slot:ident)*,)? |$store:pat, $keys:pat| $build:expr) => {
         ExprDecl {
-            name: "Add",
-            symbol: '+',
+            name: stringify!($name),
+            symbol: $symbol,
             shapes: vec![ExprShape {
-                slots: vec![ExprSlot::Value { name: "a" }, ExprSlot::Value { name: "b" }],
-                build_expr: |_, k| AstExpr::Add(k[0], k[1]),
-            }],
-        },
-        ExprDecl {
+                slots: vec![$($(ExprSlot::Value { name: stringify!($slot) }, )*)?],
+                build_expr: Box::new(|$store, $keys| $build)
+            }]
+        }
+    };
+}
+
+fn main() {
+
+    let mut builtins = vec![
+        expr_decl!(Add as '+', #slots a b, |_, k| AstExpr::Add(k[0], k[1])),
+        expr_decl!(CompareEqual as '=', #slots a b, |_, k| AstExpr::Compare(Ordering::Equal, k[0], k[1])),
+        expr_decl!(Print as 'P', #slots value, |_, k| AstExpr::Print(k[0])),
+        expr_decl!(ReadLine as 'R', |_, _| AstExpr::ReadLine),
+        expr_decl!(If as '?', #slots cond t f, |_, k| AstExpr::If(k[0], k[1], k[2])),
+        expr_decl!(True as 't', |_, _| AstExpr::Constant(Value::Bool(true))),
+        expr_decl!(False as 'f', |_, _| AstExpr::Constant(Value::Bool(false))),
+        expr_decl!(Repeat as '#', #slots count body, |_, k| AstExpr::Repeat(k[0], k[1])),
+    ];
+
+    let functions = vec![
+        BuiltinFunction {
             name: "CompareLT",
             symbol: '<',
-            shapes: vec![ExprShape {
-                slots: vec![ExprSlot::Value { name: "a" }, ExprSlot::Value { name: "b" }],
-                build_expr: |_, k| AstExpr::Compare(Ordering::Less, k[0], k[1]),
-            }],
-        },
-        ExprDecl {
-            name: "CompareGT",
-            symbol: '>',
-            shapes: vec![ExprShape {
-                slots: vec![ExprSlot::Value { name: "a" }, ExprSlot::Value { name: "b" }],
-                build_expr: |_, k| AstExpr::Compare(Ordering::Greater, k[0], k[1]),
-            }],
-        },
-        ExprDecl {
-            name: "CompareEqual",
-            symbol: '=',
-            shapes: vec![ExprShape {
-                slots: vec![ExprSlot::Value { name: "a" }, ExprSlot::Value { name: "b" }],
-                build_expr: |_, k| AstExpr::Compare(Ordering::Equal, k[0], k[1]),
-            }],
-        },
-        ExprDecl {
-            name: "Print",
-            symbol: 'P',
-            shapes: vec![ExprShape {
-                slots: vec![ExprSlot::Value { name: "value" }],
-                build_expr: |_, k| AstExpr::Print(k[0]),
-            }],
-        },
-        ExprDecl {
-            name: "ReadLine",
-            symbol: 'R',
-            shapes: vec![ExprShape {
-                slots: vec![],
-                build_expr: |_, _| AstExpr::ReadLine,
-            }],
-        },
-        ExprDecl {
-            name: "If",
-            symbol: '?',
-            shapes: vec![ExprShape {
-                slots: vec![
-                    ExprSlot::Value { name: "condition" },
-                    ExprSlot::Value { name: "then" },
-                    ExprSlot::Value { name: "else" },
-                ],
-                build_expr: |_, k| AstExpr::If(k[0], k[1], k[2]),
-            }],
-        },
-        ExprDecl {
-            name: "True",
-            symbol: 't',
-            shapes: vec![ExprShape {
-                slots: vec![],
-                build_expr: |_, _| AstExpr::Constant(Value::Bool(true)),
-            }],
-        },
-        ExprDecl {
-            name: "False",
-            symbol: 'f',
-            shapes: vec![ExprShape {
-                slots: vec![],
-                build_expr: |_, _| AstExpr::Constant(Value::Bool(false)),
-            }],
-        },
-        ExprDecl {
-            name: "Repeat",
-            symbol: '#',
-            shapes: vec![ExprShape {
-                slots: vec![
-                    ExprSlot::Value { name: "count" },
-                    ExprSlot::Value { name: "body" },
-                ],
-                build_expr: |_, k| AstExpr::Repeat(k[0], k[1]),
-            }],
-        },
+            param_count: 2,
+            types: vec![
+                FunctionPrototype {
+                    params: vec![ExprType::Int, ExprType::Int],
+                    out: ExprType::Bool
+                }
+            ],
+            build: |builder, store, children| {
+                use Instruction::*;
+                builder.build_instructions(store, children[0])?;
+                builder.build_instructions(store, children[1])?;
+                builder.push(Sub(ValueType::Int));
+                builder.push(CompareZero(Ordering::Less));
+                builder.push(PushRegister(Register::WasTrue));
+                Ok(ExprType::Bool)
+            }
+        }
     ];
+
+    for func in functions {
+        let func = Rc::new(func);
+        builtins.push(ExprDecl {
+            name: func.name,
+            symbol: func.symbol,
+            shapes: vec![ExprShape {
+                slots: std::iter::repeat(ExprSlot::Value { name: "" }).take(func.param_count).collect(),
+                build_expr: Box::new(move |_, k| AstExpr::CallBuiltin(func.clone(), k.into()))
+            }],
+        })
+    }
 
     let mut parser = Parser::new();
     let code = std::env::args()
@@ -1515,7 +1558,7 @@ fn main() {
         };
 
         println!("Code: {}", code);
-        println!("\nParsing duration: {} ns", parsing_time.as_nanos());
+        println!("\nParsing duration: {:?}", parsing_time);
         println!(
             "Ast:\n{}\n",
             keys.iter()
@@ -1531,7 +1574,7 @@ fn main() {
         });
         let mut blocks = res?;
 
-        println!("BlockSet build duration: {} ns", bb_build_time.as_nanos());
+        println!("BlockSet build duration: {:?}", bb_build_time);
         println!("BlockSet (unoptimized)");
         for (i, block) in blocks.iter().enumerate() {
             println!("  #{} -> {:?}", i, block.end);
@@ -1546,8 +1589,8 @@ fn main() {
         });
 
         println!(
-            "BlockSet optimization duration: {} ns",
-            optimize_time.as_nanos()
+            "BlockSet optimization duration: {:?}",
+            optimize_time
         );
         println!("BlockSet");
         for (i, block) in blocks.iter().enumerate() {
@@ -1561,8 +1604,8 @@ fn main() {
             measure(move || InstructionSetBuilder::from_bb(blocks).into_instructions());
 
         println!(
-            "InstructionSet build duration: {} ns",
-            bb_build_time.as_nanos()
+            "InstructionSet build duration: {:?}",
+            inst_build_time
         );
         println!("InstructionSet");
         for (i, ins) in instructions.iter().enumerate() {
@@ -1584,24 +1627,25 @@ fn main() {
         println!("\n\nTrace:");
         for frame in &vm.stack_frames {
             println!(
-                "{: <3} {: <30} -> Int: {:?}, Bool: {:?}, String: {:?}",
+                "{: <3} {: <30} -> Int: {:?}, Bool: {:?}, String: {:?}, T: {}",
                 frame.execution_pointer,
                 format!("{:?}", &vm.instructions[frame.execution_pointer]),
                 frame.val_stack.int_values,
                 frame.val_stack.bool_values,
                 frame.val_stack.string_values,
+                frame.registers.was_true
             );
         }
 
         println!("\nInstructions executed:        {}", vm.instruction_counter);
-        println!("Execution duration:           {} µs", exec_time.as_micros());
+        println!("Execution duration:           {:?}", exec_time);
         println!(
-            "Total duration (excl. debug): {} µs",
-            parsing_time.as_micros()
-                + bb_build_time.as_micros()
-                + optimize_time.as_micros()
-                + inst_build_time.as_micros()
-                + exec_time.as_micros()
+            "Total duration (excl. debug): {:?}",
+            parsing_time
+                + bb_build_time
+                + optimize_time
+                + inst_build_time
+                + exec_time
         );
 
         Ok(())
@@ -1617,8 +1661,8 @@ fn main() {
     }
 
     println!(
-        "Total duration:               {} µs",
-        total_time.as_micros()
+        "Total duration:               {:?}",
+        total_time
     );
 }
 

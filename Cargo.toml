@@ -5,7 +5,8 @@ authors = ["Jani Mustonen <janijohannes@kapsi.fi>"]
 edition = "2018"
 
 [profile.release]
-lto = true
+lto = "fat"
+codegen-units = 1
 # debug = true
 
 [dependencies]
