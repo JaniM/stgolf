@@ -45,10 +45,11 @@ impl ExprType {
 #[derive(Clone, Debug, PartialEq)]
 struct FunctionPrototype {
     params: Vec<ExprType>,
-    out: ExprType
+    out: ExprType,
 }
 
-type FunctionBuilder = fn(&mut BasicBlockBuilder, &AstStore, &[AstKey]) -> Result<ExprType, Box<TypeError>>;
+type FunctionBuilder =
+    fn(&mut BasicBlockBuilder, &AstStore, &[AstKey]) -> Result<ExprType, Box<TypeError>>;
 
 #[derive(Derivative)]
 #[derivative(Clone, Debug, PartialEq)]
@@ -58,7 +59,7 @@ struct BuiltinFunction {
     param_count: usize,
     types: Vec<FunctionPrototype>,
     #[derivative(Debug = "ignore", PartialEq = "ignore")]
-    build: FunctionBuilder
+    build: FunctionBuilder,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -111,12 +112,9 @@ impl Value {
 enum AstExpr {
     Constant(Value),
     Add(AstKey, AstKey),
-    Print(AstKey),
-    ReadLine,
     If(AstKey, AstKey, AstKey),
-    Compare(Ordering, AstKey, AstKey),
     Repeat(AstKey, AstKey),
-    CallBuiltin(Rc<BuiltinFunction>, Vec<AstKey>)
+    CallBuiltin(Rc<BuiltinFunction>, Vec<AstKey>),
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -219,26 +217,11 @@ impl<'a> AstNode<'a> {
                 store.get(*l).print(store, level + 1),
                 store.get(*r).print(store, level + 1)
             ),
-            Print(v) => format!(
-                "{}Print<{}>(\n{})",
-                "  ".repeat(level),
-                t,
-                store.get(*v).print(store, level + 1),
-            ),
-            ReadLine => format!("{}ReadLine", "  ".repeat(level),),
             If(c, l, r) => format!(
                 "{}If<{}>(\n{},\n{},\n{})",
                 "  ".repeat(level),
                 t,
                 store.get(*c).print(store, level + 1),
-                store.get(*l).print(store, level + 1),
-                store.get(*r).print(store, level + 1)
-            ),
-            Compare(o, l, r) => format!(
-                "{}Compare[{:?}]<{}>(\n{},\n{})",
-                "  ".repeat(level),
-                o,
-                t,
                 store.get(*l).print(store, level + 1),
                 store.get(*r).print(store, level + 1)
             ),
@@ -249,12 +232,14 @@ impl<'a> AstNode<'a> {
                 store.get(*b).print(store, level + 1)
             ),
             CallBuiltin(f, a) => format!(
-                "{}Call[{}]<{:?}>({})",
+                "{}Call[{}]<{}>({})",
                 "  ".repeat(level),
                 f.name,
                 t,
-                a.iter().map(|a| format!("\n{:?}", store.get(*a).print(store, level + 1))).join(",")
-            )
+                a.iter()
+                    .map(|a| format!("\n{}", store.get(*a).print(store, level + 1)))
+                    .join(",")
+            ),
         }
     }
 
@@ -316,15 +301,6 @@ impl<'a> AstNode<'a> {
                     Ok(lt)
                 }
             }
-            Print(value) => store.get(*value).expr_type(store, read_as),
-            ReadLine => {
-                if catch! { read_as?.contains(&ExprType::String) } == Some(false) {
-                    return Err(TypeError::for_node(self, read_as)
-                        .my_type(Some(ExprType::String))
-                        .into());
-                }
-                Ok(ExprType::String)
-            }
             If(c, t, e) => {
                 store
                     .get(*c)
@@ -358,40 +334,6 @@ impl<'a> AstNode<'a> {
                     }))?;
                 Ok(tt)
             }
-            Compare(o, l, r) => {
-                if catch! { read_as?.contains(&ExprType::Bool) } == Some(false) {
-                    return Err(TypeError::for_node(self, read_as)
-                        .my_type(Some(ExprType::Bool))
-                        .into());
-                }
-                let target: &[ExprType] = if *o == Ordering::Equal {
-                    &[ExprType::Bool, ExprType::Int, ExprType::String]
-                } else {
-                    &[ExprType::Int]
-                };
-                let lt = store.get(*l).expr_type(store, Some(target)).map_err(
-                    TypeError::create_map_up(|e| {
-                        TypeError::for_node(self, read_as)
-                            .wrong_param(0, Some(target), e.my_type)
-                            .my_type(Some(ExprType::Bool))
-                            .down()
-                    }),
-                )?;
-                store
-                    .get(*r)
-                    .expr_type(store, Some(&[lt]))
-                    .map_err(TypeError::create_map_up(|e| {
-                        TypeError::for_node(self, read_as)
-                            .wrong_param(1, Some(&[lt]), e.my_type)
-                            .my_type(Some(ExprType::Bool))
-                            .down()
-                    }))?;
-                match lt {
-                    ExprType::Int => Ok(ExprType::Bool),
-                    ExprType::String | ExprType::Bool => Ok(ExprType::Bool),
-                    ExprType::Void => unreachable!("Void type"),
-                }
-            }
             Repeat(c, b) => {
                 if catch! { read_as?.contains(&ExprType::Void) } == Some(false) {
                     return Err(TypeError::for_node(self, read_as)
@@ -419,27 +361,28 @@ impl<'a> AstNode<'a> {
                 Ok(ExprType::Void)
             }
             CallBuiltin(func, args) => {
-                let mut matched_up = false;
                 for prototype in &func.types {
-                    if catch! { read_as?.contains(&prototype.out) } == Some(false) {
+                    if args
+                        .iter()
+                        .zip(prototype.params.iter())
+                        .any(|(a, t)| store.get(*a).expr_type(store, Some(&[*t])).is_err())
+                    {
                         continue;
                     }
-                    matched_up = true;
+
+                    if catch! { read_as?.contains(&prototype.out) } == Some(false) {
+                        return Err(TypeError::for_node(self, read_as)
+                            .my_type(Some(prototype.out))
+                            .into());
+                    }
 
                     if prototype.params.len() != args.len() {
                         continue;
                     }
 
-                    if args.iter().zip(prototype.params.iter()).any(|(a, t)| store.get(*a).expr_type(store, Some(&[*t])).is_err()) {
-                        continue;
-                    }
-
                     return Ok(prototype.out);
                 }
-                Err(TypeError {
-                    direction: if matched_up { TypeErrorDirection::Down } else { TypeErrorDirection::Up },
-                    ..TypeError::for_node(self, read_as)
-                }.into())
+                Err(TypeError::for_node(self, read_as).into())
             }
         }
     }
@@ -652,7 +595,7 @@ enum ValueType {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Register {
-    WasTrue
+    WasTrue,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -787,29 +730,6 @@ impl BasicBlockBuilder {
                 self.push(Add(r_type.into_value_type()));
                 r_type
             }
-            AstExpr::Print(v) => {
-                let t = self.build_instructions(store, *v)?;
-                // This likely requires special handling for future types
-                match t {
-                    ExprType::Int => {
-                        self.push(Print(ValueType::Int));
-                    }
-                    ExprType::Bool => {
-                        self.push(Print(ValueType::Bool));
-                    }
-                    ExprType::String => {
-                        self.push(Print(ValueType::String));
-                    }
-                    ExprType::Void => {
-                        unreachable!("Void value");
-                    }
-                }
-                t
-            }
-            AstExpr::ReadLine => {
-                self.push(ReadLine);
-                ExprType::String
-            }
             AstExpr::If(c, l, r) => {
                 let r_type = expr.expr_type(store, None)?;
 
@@ -829,18 +749,6 @@ impl BasicBlockBuilder {
                 self.blocks[after_then_block].end = BBJump::Jump(end);
 
                 r_type
-            }
-            AstExpr::Compare(o, l, r) => {
-                self.build_instructions(store, *l)?;
-                let rt = self.build_instructions(store, *r)?;
-                if *o == Ordering::Equal {
-                    self.push(CompareEqual(rt.into_value_type()));
-                } else if rt == ExprType::Int {
-                    self.push(Sub(ValueType::Int));
-                    self.push(CompareZero(*o));
-                }
-                self.push(PushRegister(Register::WasTrue));
-                ExprType::Bool
             }
             AstExpr::Repeat(c, b) => {
                 self.build_instructions(store, *c)?;
@@ -972,6 +880,40 @@ fn remove_empty(blocks: &mut Vec<BasicBlock>) {
             reassign_blocks(blocks, idx, target);
         } else {
             idx += 1;
+        }
+    }
+}
+
+fn remove_unnecessary_register_loads(blocks: &mut Vec<BasicBlock>) {
+    let mut remove_indices = Vec::with_capacity(10);
+    for block in blocks {
+        let mut last_push = None;
+        let mut push_dropped = false;
+        for (idx, inst) in block.instructions.iter().enumerate() {
+            match inst {
+                Instruction::PushRegister(Register::WasTrue) => {
+                    last_push = Some(idx);
+                }
+                Instruction::CompareEqual(_)
+                | Instruction::CompareZero(_)
+                | Instruction::Add(ValueType::Bool) => {
+                    last_push = None;
+                    push_dropped = false;
+                }
+                Instruction::LoadRegister(Register::WasTrue) => {
+                    if let Some(push_idx) = last_push {
+                        if !push_dropped {
+                            remove_indices.push(push_idx);
+                            push_dropped = true;
+                        }
+                        remove_indices.push(idx);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (offset, idx) in remove_indices.drain(..).enumerate() {
+            block.instructions.remove(idx - offset);
         }
     }
 }
@@ -1129,11 +1071,10 @@ struct VMStack<Check> {
     _check: PhantomData<fn(&Check) -> ()>,
 }
 
-
 #[derive(Derivative)]
 #[derivative(Clone, Debug, Default)]
 struct VMRegisters {
-    was_true: bool
+    was_true: bool,
 }
 
 #[derive(Derivative)]
@@ -1325,7 +1266,7 @@ where
             execution_pointer: 0,
             stack_frames: Vec::new(),
             instruction_counter: 0,
-            registers: VMRegisters::default()
+            registers: VMRegisters::default(),
         }
     }
 
@@ -1383,8 +1324,7 @@ where
         self.instruction_counter += 1;
 
         match instruction {
-            Instruction::LoadConstant(v) =>
-                vm_for_all!(#value v, { stack.push(v.clone()); }),
+            Instruction::LoadConstant(v) => vm_for_all!(#value v, { stack.push(v.clone()); }),
             Instruction::Add(t) => match t {
                 ValueType::Int => {
                     let b = stack.pop::<i64>();
@@ -1415,14 +1355,10 @@ where
                     unreachable!("Sub(Bool)");
                 }
             },
-            Instruction::ToString(t) =>
-                vm_for_all!(#type t, #stack stack, #pop v, { stack.push(v.to_string()); }),
-            Instruction::Print(t) =>
-                vm_for_all!(#type t, #stack stack, #peek v, { print!("{}", v); }),
-            Instruction::Copy(t) =>
-                vm_for_all!(#type t, #stack stack, #peek v, { let v = v.clone(); stack.push(v); }),
-            Instruction::Drop(t) =>
-                vm_for_all!(#type t, #stack stack, #pop _, { }),
+            Instruction::ToString(t) => vm_for_all!(#type t, #stack stack, #pop v, { stack.push(v.to_string()); }),
+            Instruction::Print(t) => vm_for_all!(#type t, #stack stack, #peek v, { print!("{}", v); }),
+            Instruction::Copy(t) => vm_for_all!(#type t, #stack stack, #peek v, { let v = v.clone(); stack.push(v); }),
+            Instruction::Drop(t) => vm_for_all!(#type t, #stack stack, #pop _, { }),
             Instruction::ReadLine => {
                 use std::io::Write;
                 let mut buf = String::new();
@@ -1431,8 +1367,7 @@ where
                 buf = buf.trim_end_matches(|c| c == '\r' || c == '\n').into();
                 stack.push(buf);
             }
-            Instruction::CompareEqual(t) =>
-                vm_for_all!(#type t, #stack stack, #pop b a, { registers.was_true = a == b; }),
+            Instruction::CompareEqual(t) => vm_for_all!(#type t, #stack stack, #pop b a, { registers.was_true = a == b; }),
             Instruction::CompareZero(c) => {
                 let a: i64 = stack.pop();
                 registers.was_true = a.cmp(&0) == *c;
@@ -1450,12 +1385,12 @@ where
                 Register::WasTrue => {
                     stack.push(registers.was_true);
                 }
-            }
+            },
             Instruction::LoadRegister(r) => match r {
                 Register::WasTrue => {
                     registers.was_true = stack.pop();
                 }
-            }
+            },
             Instruction::Halt => {
                 return Ok(VMStep::End);
             }
@@ -1484,13 +1419,24 @@ macro_rules! expr_decl {
     };
 }
 
-fn main() {
+macro_rules! func_decl {
+    (name $name:expr, symbol $symbol:expr, args $argc:expr, $(type [$($param:expr),*] => $out:expr,)+ $build:expr) => {
+        BuiltinFunction {
+            name: $name,
+            symbol: $symbol,
+            param_count: $argc,
+            types: vec![$(FunctionPrototype {
+                params: vec![$($param),*],
+                out: $out
+            }),+],
+            build: { $build }
+        }
+    };
+}
 
+fn main() {
     let mut builtins = vec![
         expr_decl!(Add as '+', #slots a b, |_, k| AstExpr::Add(k[0], k[1])),
-        expr_decl!(CompareEqual as '=', #slots a b, |_, k| AstExpr::Compare(Ordering::Equal, k[0], k[1])),
-        expr_decl!(Print as 'P', #slots value, |_, k| AstExpr::Print(k[0])),
-        expr_decl!(ReadLine as 'R', |_, _| AstExpr::ReadLine),
         expr_decl!(If as '?', #slots cond t f, |_, k| AstExpr::If(k[0], k[1], k[2])),
         expr_decl!(True as 't', |_, _| AstExpr::Constant(Value::Bool(true))),
         expr_decl!(False as 'f', |_, _| AstExpr::Constant(Value::Bool(false))),
@@ -1498,17 +1444,29 @@ fn main() {
     ];
 
     let functions = vec![
-        BuiltinFunction {
-            name: "CompareLT",
-            symbol: '<',
-            param_count: 2,
-            types: vec![
-                FunctionPrototype {
-                    params: vec![ExprType::Int, ExprType::Int],
-                    out: ExprType::Bool
-                }
-            ],
-            build: |builder, store, children| {
+        func_decl! {
+            name "Print", symbol 'P', args 1,
+            type [ExprType::Int] => ExprType::Int,
+            type [ExprType::String] => ExprType::String,
+            type [ExprType::Bool] => ExprType::Bool,
+            |builder, store, children| {
+                let t = builder.build_instructions(store, children[0])?;
+                builder.push(Instruction::Print(t.into_value_type()));
+                Ok(t)
+            }
+        },
+        func_decl! {
+            name "ReadLine", symbol 'R', args 0,
+            type [] => ExprType::String,
+            |builder, _store, _children| {
+                builder.push(Instruction::ReadLine);
+                Ok(ExprType::String)
+            }
+        },
+        func_decl! {
+            name "CompareLT", symbol '<', args 2,
+            type [ExprType::Int, ExprType::Int] => ExprType::Bool,
+            |builder, store, children| {
                 use Instruction::*;
                 builder.build_instructions(store, children[0])?;
                 builder.build_instructions(store, children[1])?;
@@ -1517,7 +1475,34 @@ fn main() {
                 builder.push(PushRegister(Register::WasTrue));
                 Ok(ExprType::Bool)
             }
-        }
+        },
+        func_decl! {
+            name "CompareGT", symbol '>', args 2,
+            type [ExprType::Int, ExprType::Int] => ExprType::Bool,
+            |builder, store, children| {
+                use Instruction::*;
+                builder.build_instructions(store, children[0])?;
+                builder.build_instructions(store, children[1])?;
+                builder.push(Sub(ValueType::Int));
+                builder.push(CompareZero(Ordering::Greater));
+                builder.push(PushRegister(Register::WasTrue));
+                Ok(ExprType::Bool)
+            }
+        },
+        func_decl! {
+            name "Equal", symbol '=', args 2,
+            type [ExprType::Int, ExprType::Int] => ExprType::Bool,
+            type [ExprType::String, ExprType::String] => ExprType::Bool,
+            type [ExprType::Bool, ExprType::Bool] => ExprType::Bool,
+            |builder, store, children| {
+                use Instruction::*;
+                builder.build_instructions(store, children[0])?;
+                let t = builder.build_instructions(store, children[1])?;
+                builder.push(CompareEqual(t.into_value_type()));
+                builder.push(PushRegister(Register::WasTrue));
+                Ok(ExprType::Bool)
+            }
+        },
     ];
 
     for func in functions {
@@ -1526,8 +1511,10 @@ fn main() {
             name: func.name,
             symbol: func.symbol,
             shapes: vec![ExprShape {
-                slots: std::iter::repeat(ExprSlot::Value { name: "" }).take(func.param_count).collect(),
-                build_expr: Box::new(move |_, k| AstExpr::CallBuiltin(func.clone(), k.into()))
+                slots: std::iter::repeat(ExprSlot::Value { name: "" })
+                    .take(func.param_count)
+                    .collect(),
+                build_expr: Box::new(move |_, k| AstExpr::CallBuiltin(func.clone(), k.into())),
             }],
         })
     }
@@ -1584,14 +1571,12 @@ fn main() {
         }
 
         let (_, optimize_time) = measure(|| {
+            remove_unnecessary_register_loads(&mut blocks);
             remove_duplicates(&mut blocks);
             remove_empty(&mut blocks);
         });
 
-        println!(
-            "BlockSet optimization duration: {:?}",
-            optimize_time
-        );
+        println!("BlockSet optimization duration: {:?}", optimize_time);
         println!("BlockSet");
         for (i, block) in blocks.iter().enumerate() {
             println!("  #{} -> {:?}", i, block.end);
@@ -1603,10 +1588,7 @@ fn main() {
         let (instructions, inst_build_time) =
             measure(move || InstructionSetBuilder::from_bb(blocks).into_instructions());
 
-        println!(
-            "InstructionSet build duration: {:?}",
-            inst_build_time
-        );
+        println!("InstructionSet build duration: {:?}", inst_build_time);
         println!("InstructionSet");
         for (i, ins) in instructions.iter().enumerate() {
             println!("  {:04}: {:?}", i, ins);
@@ -1641,11 +1623,7 @@ fn main() {
         println!("Execution duration:           {:?}", exec_time);
         println!(
             "Total duration (excl. debug): {:?}",
-            parsing_time
-                + bb_build_time
-                + optimize_time
-                + inst_build_time
-                + exec_time
+            parsing_time + bb_build_time + optimize_time + inst_build_time + exec_time
         );
 
         Ok(())
@@ -1660,10 +1638,7 @@ fn main() {
         }
     }
 
-    println!(
-        "Total duration:               {:?}",
-        total_time
-    );
+    println!("Total duration:               {:?}", total_time);
 }
 
 fn print_type_error(code: &str, e: &TypeError) {
