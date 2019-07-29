@@ -845,12 +845,6 @@ impl ControlFlowGraph {
             }
 
             if !pushed {
-                // for to in self.nodes[block_idx].to.iter() {
-                //     if !seen.contains(to) {
-                //         seen.push(*to);
-                //         stack.push(*to);
-                //     }
-                // }
                 ordering.push(block_idx);
             }
         }
@@ -890,13 +884,14 @@ fn remove_unnecessary_register_loads(blocks: &mut Vec<BasicBlock>) {
         let mut last_push = None;
         let mut push_dropped = false;
         for (idx, inst) in block.instructions.iter().enumerate() {
+            use Instruction::*;
             match inst {
-                Instruction::PushRegister(Register::WasTrue) => {
+                PushRegister(Register::WasTrue) => {
                     last_push = Some(idx);
                 }
-                Instruction::CompareEqual(_)
-                | Instruction::CompareZero(_)
-                | Instruction::Add(ValueType::Bool) => {
+                CompareEqual(_)
+                | CompareZero(_)
+                | Add(ValueType::Bool) | LoadConstant(Value::Bool(_)) => {
                     last_push = None;
                     push_dropped = false;
                 }
@@ -1295,25 +1290,30 @@ where
         let stack = &mut self.val_stack;
         let registers = &mut self.registers;
 
-        let jump = match &self.instructions[self.execution_pointer..] {
-            [Instruction::LoadConstant(Value::Int(v)), Instruction::Sub(ValueType::Int), ..] => {
-                let a = stack.peek_mut::<i64>();
-                *a -= v;
-                2
-            }
-            [Instruction::Copy(ValueType::Int), Instruction::CompareZero(c), ..] => {
-                let a = stack.peek::<i64>();
-                registers.was_true = a.cmp(&0) == *c;
-                2
-            }
-            _ => 0,
-        };
+        // let jump = match &self.instructions[self.execution_pointer..] {
+        //     [Instruction::LoadConstant(Value::Int(v)), Instruction::Add(ValueType::Int), ..] => {
+        //         let a = stack.peek_mut::<i64>();
+        //         *a += v;
+        //         2
+        //     }
+        //     [Instruction::LoadConstant(Value::Int(v)), Instruction::Sub(ValueType::Int), ..] => {
+        //         let a = stack.peek_mut::<i64>();
+        //         *a -= v;
+        //         2
+        //     }
+        //     [Instruction::Copy(ValueType::Int), Instruction::CompareZero(c), ..] => {
+        //         let a = stack.peek::<i64>();
+        //         registers.was_true = a.cmp(&0) == *c;
+        //         2
+        //     }
+        //     _ => 0,
+        // };
 
-        if jump > 0 {
-            self.instruction_counter += jump;
-            self.execution_pointer += jump;
-            return Ok(VMStep::Ok);
-        }
+        // if jump > 0 {
+        //     self.instruction_counter += jump;
+        //     self.execution_pointer += jump;
+        //     return Ok(VMStep::Ok);
+        // }
 
         let instruction = &self
             .instructions
