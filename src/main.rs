@@ -13,6 +13,9 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::str::CharIndices;
 
+const INT_REGISTERS: usize = 3;
+const BOOL_REGISTERS: usize = 3;
+
 macro_rules! catch {
     ($($code:tt)+) => {
         (|| Some({ $($code)+ }))()
@@ -595,20 +598,55 @@ enum ValueType {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Register {
-    WasTrue,
+    Int(u8),
+    Bool(u8),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RegisterValue {
+    Int(u8, i64),
+    Bool(u8, bool)
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum IntTarget {
+    Stack,
+    Reg(u8),
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum BoolTarget {
+    Stack,
+    Reg(u8),
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum TwoArgCommand {
+    Int(IntTarget, IntTarget, IntTarget),
+    ValueType(ValueType)
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ValueTarget {
+    Int(IntTarget),
+    String,
+    Bool(BoolTarget)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Instruction {
     LoadConstant(Value),
-    Add(ValueType),
-    Sub(ValueType),
+    LoadConstantReg(RegisterValue),
+    AddInt(IntTarget, IntTarget, IntTarget),
+    SubInt(IntTarget, IntTarget, IntTarget),
+    OrBool(BoolTarget, BoolTarget, BoolTarget),
+    AddString,
     ToString(ValueType),
     Print(ValueType),
     Copy(ValueType),
     Drop(ValueType),
     ReadLine,
-    CompareZero(Ordering),
+    CompareZero(IntTarget, Ordering),
     CompareEqual(ValueType),
     CondJump(usize, bool),
     Jump(usize),
@@ -727,14 +765,24 @@ impl BasicBlockBuilder {
                     self.push(ToString(ValueType::Bool));
                 }
 
-                self.push(Add(r_type.into_value_type()));
+                self.push(match r_type.into_value_type() {
+                    ValueType::Int => {
+                        AddInt(IntTarget::Stack, IntTarget::Stack, IntTarget::Stack)
+                    },
+                    ValueType::Bool => {
+                        OrBool(BoolTarget::Stack, BoolTarget::Stack, BoolTarget::Stack)
+                    }
+                    ValueType::String => {
+                        AddString
+                    }
+                });
                 r_type
             }
             AstExpr::If(c, l, r) => {
                 let r_type = expr.expr_type(store, None)?;
 
                 self.build_instructions(store, *c)?;
-                self.push(LoadRegister(Register::WasTrue));
+                self.push(LoadRegister(Register::Bool(0)));
                 let start_block = self.curremt_block;
 
                 let then_block = self.new_block();
@@ -755,9 +803,9 @@ impl BasicBlockBuilder {
 
                 let start = self.new_block();
                 self.push(LoadConstant(Value::Int(1)));
-                self.push(Sub(ValueType::Int));
+                self.push(SubInt(IntTarget::Stack, IntTarget::Stack, IntTarget::Stack));
                 self.push(Copy(ValueType::Int));
-                self.push(CompareZero(Ordering::Less));
+                self.push(CompareZero(IntTarget::Stack, Ordering::Less));
 
                 let loop_body = self.new_block();
 
@@ -853,6 +901,9 @@ impl ControlFlowGraph {
     }
 }
 
+/// Remove blocks that have a 100% equal clone. Replaces jumps to the removed
+/// block with the duplicate.
+/// Prefers later blocks to ensure efficient bytecode ordering.
 fn remove_duplicates(blocks: &mut Vec<BasicBlock>) {
     let mut idx = 0usize;
     while idx < blocks.len() {
@@ -866,6 +917,7 @@ fn remove_duplicates(blocks: &mut Vec<BasicBlock>) {
     }
 }
 
+/// Removes blocks with zero instructions and an unconditional jump.
 fn remove_empty(blocks: &mut Vec<BasicBlock>) {
     let mut idx = 0usize;
     while idx < blocks.len() {
@@ -878,6 +930,7 @@ fn remove_empty(blocks: &mut Vec<BasicBlock>) {
     }
 }
 
+/// Tries to remove unnecessary (PushRegister, LoadRegister) pairs.
 fn remove_unnecessary_register_loads(blocks: &mut Vec<BasicBlock>) {
     let mut remove_indices = Vec::with_capacity(10);
     for block in blocks {
@@ -886,16 +939,19 @@ fn remove_unnecessary_register_loads(blocks: &mut Vec<BasicBlock>) {
         for (idx, inst) in block.instructions.iter().enumerate() {
             use Instruction::*;
             match inst {
-                PushRegister(Register::WasTrue) => {
+                PushRegister(Register::Bool(_)) => {
                     last_push = Some(idx);
-                }
-                CompareEqual(_)
-                | CompareZero(_)
-                | Add(ValueType::Bool) | LoadConstant(Value::Bool(_)) => {
-                    last_push = None;
                     push_dropped = false;
                 }
-                Instruction::LoadRegister(Register::WasTrue) => {
+                CompareEqual(_)
+                | CompareZero(IntTarget::Stack, _)
+                | LoadConstant(Value::Bool(_)) => {
+                    last_push = None;
+                }
+                OrBool(a, b, t) if *a == BoolTarget::Stack || *b == BoolTarget::Stack || *t == BoolTarget::Stack => {
+                    last_push = None;
+                }
+                Instruction::LoadRegister(Register::Bool(_)) => {
                     if let Some(push_idx) = last_push {
                         if !push_dropped {
                             remove_indices.push(push_idx);
@@ -913,6 +969,156 @@ fn remove_unnecessary_register_loads(blocks: &mut Vec<BasicBlock>) {
     }
 }
 
+/// This transformation elevates values from the stack to registers *inside* a
+/// block. Block-to-block interface must not be affected.
+fn simple_elevate_to_registers(blocks: &mut Vec<BasicBlock>) {
+    type Scope = Vec<u8>;
+
+    #[derive(Copy, Clone)]
+    struct PromoteTarget {
+        target_idx: usize,
+        target_arg: u8,
+        scope_end: bool,
+        is_stack: bool,
+        register: Option<u8>
+    }
+
+    impl PromoteTarget {
+        fn new(target_idx: usize, target_arg: u8, scope_end: bool) -> Self {
+            PromoteTarget {
+                target_idx,
+                target_arg,
+                scope_end,
+                is_stack: false,
+                register: None
+            }
+        }
+
+        fn reg(mut self, register: u8) -> Self {
+            self.register = Some(register);
+            self
+        }
+    }
+
+    fn promote_inst(scopes: &mut Vec<Scope>, promote_target: &mut Vec<PromoteTarget>, promoted: &mut Vec<(PromoteTarget, u8)>) -> Option<IntTarget> {
+        let target = catch! {
+            let target = promote_target.last()?;
+            if target.is_stack {
+                IntTarget::Stack
+            } else {
+                let used_regs = scopes.last_mut().expect("simple_elevate_to_registers() scope last");
+                let reg = target.register.or_else(|| select_free_int_register(&used_regs))?;
+                used_regs.push(reg);
+                promoted.push((*target, reg));
+                IntTarget::Reg(reg)
+            }
+        };
+        if let Some(target) = promote_target.pop() {
+            if target.scope_end {
+                let scope = scopes.pop().expect("simple_elevate_to_registers() scope pop");
+                if let Some(scope2) = scopes.last_mut() {
+                    scope2.extend_from_slice(&scope);
+                } else {
+                    scopes.push(scope);
+                }
+            }
+        }
+        target
+    }
+    for block in blocks {
+        let mut promoted = Vec::new();
+        let mut promote_target: Vec<PromoteTarget> = Vec::new();
+        let mut scopes: Vec<Vec<u8>> = Vec::new();
+        for (idx, inst) in block.instructions.iter_mut().enumerate().rev() {
+            match inst {
+                Instruction::LoadConstant(Value::Int(v)) => {
+                    let reg = promote_inst(&mut scopes, &mut promote_target, &mut promoted);
+                    if let Some(IntTarget::Reg(reg)) = reg {
+                        *inst = Instruction::LoadConstantReg(RegisterValue::Int(reg, *v));
+                    }
+                }
+                Instruction::AddInt(a, b, t) => {
+                    if *t == IntTarget::Stack {
+                        let reg = promote_inst(&mut scopes, &mut promote_target, &mut promoted);
+                        if let Some(IntTarget::Reg(reg)) = reg {
+                            *t = IntTarget::Reg(reg);
+                        }
+                    }
+                    scopes.push(Vec::new());
+                    if *a == IntTarget::Stack {
+                        promote_target.push(PromoteTarget::new(idx, 0, true));
+                    }
+                    if *b == IntTarget::Stack {
+                        promote_target.push(PromoteTarget::new(idx, 1, *a != IntTarget::Stack));
+                    }
+                }
+                Instruction::SubInt(a, b, t) => {
+                    if *t == IntTarget::Stack {
+                        let reg = promote_inst(&mut scopes, &mut promote_target, &mut promoted);
+                        if let Some(IntTarget::Reg(reg)) = reg {
+                            *t = IntTarget::Reg(reg);
+                        }
+                    }
+                    scopes.push(Vec::new());
+                    if *a == IntTarget::Stack {
+                        promote_target.push(PromoteTarget::new(idx, 0, true));
+                    }
+                    if *b == IntTarget::Stack {
+                        promote_target.push(PromoteTarget::new(idx, 1, *a != IntTarget::Stack));
+                    }
+                }
+                Instruction::CompareZero(a, _) => {
+                    if *a == IntTarget::Stack {
+                        promote_target.push(PromoteTarget::new(idx, 0, true));
+                        scopes.push(Vec::new());
+                    }
+                }
+                Instruction::Copy(ValueType::Int) => {
+                    let reg = promote_inst(&mut scopes, &mut promote_target, &mut promoted);
+                    if let Some(IntTarget::Reg(reg)) = reg {
+                        scopes.push(Vec::new());
+                        promote_target.push(PromoteTarget::new(idx, 0, true).reg(reg));
+                    }
+                }
+                Instruction::Print(ValueType::Int) => {
+                    if let Some(target) = promote_target.last_mut() {
+                        target.is_stack = true;
+                    }
+                }
+                _ => {}
+            };
+        }
+
+        for (target, reg) in promoted {
+            let idx = target.target_idx;
+            let arg = target.target_arg;
+            let inst = &mut block.instructions[idx];
+            match inst {
+                Instruction::AddInt(a, b, _) => {
+                    if arg == 0 { *a = IntTarget::Reg(reg); }
+                    if arg == 1 { *b = IntTarget::Reg(reg); }
+                }
+                Instruction::SubInt(a, b, _) => {
+                    if arg == 0 { *a = IntTarget::Reg(reg); }
+                    if arg == 1 { *b = IntTarget::Reg(reg); }
+                }
+                Instruction::CompareZero(a, _) => {
+                    *a = IntTarget::Reg(reg);
+                }
+                Instruction::Copy(ValueType::Int) => {
+                    *inst = Instruction::PushRegister(Register::Int(reg));
+                }
+                _ => {
+                    unreachable!("simple_elevate_to_registers, target promotion")
+                }
+            }
+        }
+    }
+}
+
+fn select_free_int_register(occupied: &[u8]) -> Option<u8> {
+    (0..INT_REGISTERS as u8).find(|i| !occupied.contains(i))
+}
 fn reassign_blocks(blocks: &mut Vec<BasicBlock>, original: usize, new: usize) {
     let reassign = |t: &mut usize| {
         if *t == original {
@@ -1069,7 +1275,8 @@ struct VMStack<Check> {
 #[derive(Derivative)]
 #[derivative(Clone, Debug, Default)]
 struct VMRegisters {
-    was_true: bool,
+    bools: [bool; BOOL_REGISTERS],
+    ints: [i64; INT_REGISTERS]
 }
 
 #[derive(Derivative)]
@@ -1108,6 +1315,104 @@ impl From<Box<TypeError>> for Box<VMError> {
 }
 
 type VMResult<T> = Result<T, Box<VMError>>;
+
+impl VMRegisters {
+    #[inline(always)]
+    fn push_reg<Check: ValueCheck>(&self, register: Register, stack: &mut VMStack<Check>) {
+        match register {
+            Register::Bool(idx) => {
+                unsafe { 
+                    stack.push(*self.bools.get_unchecked(idx as usize));
+                }
+            }
+            Register::Int(idx) => {
+                unsafe { 
+                    stack.push(*self.ints.get_unchecked(idx as usize));
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn load_reg<Check: ValueCheck>(&mut self, register: Register, stack: &mut VMStack<Check>) {
+        match register {
+            Register::Bool(idx) => {
+                unsafe {
+                    *self.bools.get_unchecked_mut(idx as usize) = stack.pop();
+                }
+            }
+            Register::Int(idx) => {
+                unsafe {
+                    *self.ints.get_unchecked_mut(idx as usize) = stack.pop();
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn load_reg_value(&mut self, value: RegisterValue) {
+        match value {
+            RegisterValue::Int(idx, val) => {
+                unsafe {
+                    *self.ints.get_unchecked_mut(idx as usize) = val;
+                }
+            }
+            RegisterValue::Bool(idx, val) => {
+                unsafe {
+                    *self.bools.get_unchecked_mut(idx as usize) = val;
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn get_int<Check: ValueCheck>(&self, stack: &mut VMStack<Check>, target: IntTarget) -> i64 {
+        match target {
+            IntTarget::Stack => {
+                stack.pop()
+            }
+            IntTarget::Reg(idx) => {
+                unsafe { *self.ints.get_unchecked(idx as usize) }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn set_int<Check: ValueCheck>(&mut self, stack: &mut VMStack<Check>, target: IntTarget, value: i64) {
+        match target {
+            IntTarget::Stack => {
+                stack.push(value);
+            }
+            IntTarget::Reg(idx) => {
+                unsafe { *self.ints.get_unchecked_mut(idx as usize) = value; }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn get_bool<Check: ValueCheck>(&self, stack: &mut VMStack<Check>, target: BoolTarget) -> bool {
+        match target {
+            BoolTarget::Stack => {
+                stack.pop()
+            }
+            BoolTarget::Reg(idx) => {
+                unsafe { *self.bools.get_unchecked(idx as usize) }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn set_bool<Check: ValueCheck>(&mut self, stack: &mut VMStack<Check>, target: BoolTarget, value: bool) {
+        match target {
+            BoolTarget::Stack => {
+                stack.push(value);
+            }
+            BoolTarget::Reg(idx) => {
+                unsafe { *self.bools.get_unchecked_mut(idx as usize) = value; }
+            }
+        }
+    }
+}
 
 macro_rules! vm_values {
     (
@@ -1290,31 +1595,6 @@ where
         let stack = &mut self.val_stack;
         let registers = &mut self.registers;
 
-        // let jump = match &self.instructions[self.execution_pointer..] {
-        //     [Instruction::LoadConstant(Value::Int(v)), Instruction::Add(ValueType::Int), ..] => {
-        //         let a = stack.peek_mut::<i64>();
-        //         *a += v;
-        //         2
-        //     }
-        //     [Instruction::LoadConstant(Value::Int(v)), Instruction::Sub(ValueType::Int), ..] => {
-        //         let a = stack.peek_mut::<i64>();
-        //         *a -= v;
-        //         2
-        //     }
-        //     [Instruction::Copy(ValueType::Int), Instruction::CompareZero(c), ..] => {
-        //         let a = stack.peek::<i64>();
-        //         registers.was_true = a.cmp(&0) == *c;
-        //         2
-        //     }
-        //     _ => 0,
-        // };
-
-        // if jump > 0 {
-        //     self.instruction_counter += jump;
-        //     self.execution_pointer += jump;
-        //     return Ok(VMStep::Ok);
-        // }
-
         let instruction = &self
             .instructions
             .get(self.execution_pointer)
@@ -1325,35 +1605,28 @@ where
 
         match instruction {
             Instruction::LoadConstant(v) => vm_for_all!(#value v, { stack.push(v.clone()); }),
-            Instruction::Add(t) => match t {
-                ValueType::Int => {
-                    let b = stack.pop::<i64>();
-                    let a = stack.peek_mut::<i64>();
-                    *a += b;
-                }
-                ValueType::String => {
-                    let b = stack.pop::<VMString>();
-                    let a = stack.peek_mut::<String>();
-                    *a += &*b;
-                }
-                ValueType::Bool => {
-                    let b = stack.pop::<bool>();
-                    let a = stack.peek_mut::<bool>();
-                    *a = *a || b;
-                }
+            Instruction::LoadConstantReg(v) => {
+                registers.load_reg_value(v.clone());
+            }
+            Instruction::AddInt(a_target, b_target, t_target) => {
+                let b = registers.get_int(stack, *b_target);
+                let a = registers.get_int(stack, *a_target);
+                registers.set_int(stack, *t_target, a + b);
             },
-            Instruction::Sub(t) => match t {
-                ValueType::Int => {
-                    let b = stack.pop::<i64>();
-                    let a = stack.peek_mut::<i64>();
-                    *a -= b;
-                }
-                ValueType::String => {
-                    unreachable!("Sub(String)");
-                }
-                ValueType::Bool => {
-                    unreachable!("Sub(Bool)");
-                }
+            Instruction::AddString => {
+                let b = stack.pop::<VMString>();
+                let a = stack.peek_mut::<String>();
+                *a += &*b;
+            }
+            Instruction::OrBool(a_target, b_target, t_target) => {
+                let b = registers.get_bool(stack, *b_target);
+                let a = registers.get_bool(stack, *a_target);
+                registers.set_bool(stack, *t_target, a || b);
+            }
+            Instruction::SubInt(a_target, b_target, t_target) => {
+                let b = registers.get_int(stack, *b_target);
+                let a = registers.get_int(stack, *a_target);
+                registers.set_int(stack, *t_target, a - b);
             },
             Instruction::ToString(t) => vm_for_all!(#type t, #stack stack, #pop v, { stack.push(v.to_string()); }),
             Instruction::Print(t) => vm_for_all!(#type t, #stack stack, #peek v, { print!("{}", v); }),
@@ -1367,13 +1640,13 @@ where
                 buf = buf.trim_end_matches(|c| c == '\r' || c == '\n').into();
                 stack.push(buf);
             }
-            Instruction::CompareEqual(t) => vm_for_all!(#type t, #stack stack, #pop b a, { registers.was_true = a == b; }),
-            Instruction::CompareZero(c) => {
-                let a: i64 = stack.pop();
-                registers.was_true = a.cmp(&0) == *c;
+            Instruction::CompareEqual(t) => vm_for_all!(#type t, #stack stack, #pop b a, { registers.bools[0] = a == b; }),
+            Instruction::CompareZero(target, c) => {
+                let a = registers.get_int(stack, *target);
+                registers.bools[0] = a.cmp(&0) == *c;
             }
             Instruction::CondJump(target, truthy) => {
-                let c: bool = registers.was_true;
+                let c: bool = registers.bools[0];
                 if c == *truthy {
                     self.execution_pointer = *target;
                 }
@@ -1381,15 +1654,11 @@ where
             Instruction::Jump(target) => {
                 self.execution_pointer = *target;
             }
-            Instruction::PushRegister(r) => match r {
-                Register::WasTrue => {
-                    stack.push(registers.was_true);
-                }
+            Instruction::PushRegister(r) => {
+                registers.push_reg(*r, stack);
             },
-            Instruction::LoadRegister(r) => match r {
-                Register::WasTrue => {
-                    registers.was_true = stack.pop();
-                }
+            Instruction::LoadRegister(r) => {
+                registers.load_reg(*r, stack);
             },
             Instruction::Halt => {
                 return Ok(VMStep::End);
@@ -1470,9 +1739,9 @@ fn main() {
                 use Instruction::*;
                 builder.build_instructions(store, children[0])?;
                 builder.build_instructions(store, children[1])?;
-                builder.push(Sub(ValueType::Int));
-                builder.push(CompareZero(Ordering::Less));
-                builder.push(PushRegister(Register::WasTrue));
+                builder.push(SubInt(IntTarget::Stack, IntTarget::Stack, IntTarget::Stack));
+                builder.push(CompareZero(IntTarget::Stack, Ordering::Less));
+                builder.push(PushRegister(Register::Bool(0)));
                 Ok(ExprType::Bool)
             }
         },
@@ -1483,9 +1752,9 @@ fn main() {
                 use Instruction::*;
                 builder.build_instructions(store, children[0])?;
                 builder.build_instructions(store, children[1])?;
-                builder.push(Sub(ValueType::Int));
-                builder.push(CompareZero(Ordering::Greater));
-                builder.push(PushRegister(Register::WasTrue));
+                builder.push(SubInt(IntTarget::Stack, IntTarget::Stack, IntTarget::Stack));
+                builder.push(CompareZero(IntTarget::Stack, Ordering::Greater));
+                builder.push(PushRegister(Register::Bool(0)));
                 Ok(ExprType::Bool)
             }
         },
@@ -1499,7 +1768,7 @@ fn main() {
                 builder.build_instructions(store, children[0])?;
                 let t = builder.build_instructions(store, children[1])?;
                 builder.push(CompareEqual(t.into_value_type()));
-                builder.push(PushRegister(Register::WasTrue));
+                builder.push(PushRegister(Register::Bool(0)));
                 Ok(ExprType::Bool)
             }
         },
@@ -1572,6 +1841,7 @@ fn main() {
 
         let (_, optimize_time) = measure(|| {
             remove_unnecessary_register_loads(&mut blocks);
+            simple_elevate_to_registers(&mut blocks);
             remove_duplicates(&mut blocks);
             remove_empty(&mut blocks);
         });
@@ -1609,13 +1879,14 @@ fn main() {
         println!("\n\nTrace:");
         for frame in &vm.stack_frames {
             println!(
-                "{: <3} {: <30} -> Int: {:?}, Bool: {:?}, String: {:?}, T: {}",
+                "{: <3} {: <30} -> Int: {:?}, Bool: {:?}, String: {:?}, T: {:?}, I: {:?}",
                 frame.execution_pointer,
                 format!("{:?}", &vm.instructions[frame.execution_pointer]),
                 frame.val_stack.int_values,
                 frame.val_stack.bool_values,
                 frame.val_stack.string_values,
-                frame.registers.was_true
+                frame.registers.bools,
+                frame.registers.ints
             );
         }
 
